@@ -44,15 +44,15 @@ module.exports = class btcturk extends Exchange {
                         'userTransactions', // ?offset=0&limit=25&sort=asc
                     ],
                     'post': [
-                        'buy',
+                        'exchange',
                         'cancelOrder',
-                        'sell',
                     ],
                 },
             },
             'markets': {
                 'BTC/TRY': { 'id': 'BTCTRY', 'symbol': 'BTC/TRY', 'base': 'BTC', 'quote': 'TRY', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18 },
                 'ETH/TRY': { 'id': 'ETHTRY', 'symbol': 'ETH/TRY', 'base': 'ETH', 'quote': 'TRY', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18 },
+                'XRP/TRY': { 'id': 'XRPTRY', 'symbol': 'XRP/TRY', 'base': 'XRP', 'quote': 'TRY', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18 },
                 'ETH/BTC': { 'id': 'ETHBTC', 'symbol': 'ETH/BTC', 'base': 'ETH', 'quote': 'BTC', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18 },
             },
         });
@@ -92,23 +92,26 @@ module.exports = class btcturk extends Exchange {
         if (market)
             symbol = market['symbol'];
         let timestamp = parseInt (ticker['timestamp']) * 1000;
+        let last = this.safeFloat (ticker, 'last');
         return {
             'symbol': symbol,
             'timestamp': timestamp,
             'datetime': this.iso8601 (timestamp),
-            'high': parseFloat (ticker['high']),
-            'low': parseFloat (ticker['low']),
-            'bid': parseFloat (ticker['bid']),
-            'ask': parseFloat (ticker['ask']),
+            'high': this.safeFloat (ticker, 'high'),
+            'low': this.safeFloat (ticker, 'low'),
+            'bid': this.safeFloat (ticker, 'bid'),
+            'bidVolume': undefined,
+            'ask': this.safeFloat (ticker, 'ask'),
+            'askVolume': undefined,
             'vwap': undefined,
-            'open': parseFloat (ticker['open']),
-            'close': undefined,
-            'first': undefined,
-            'last': parseFloat (ticker['last']),
+            'open': this.safeFloat (ticker, 'open'),
+            'close': last,
+            'last': last,
+            'previousClose': undefined,
             'change': undefined,
             'percentage': undefined,
-            'average': parseFloat (ticker['average']),
-            'baseVolume': parseFloat (ticker['volume']),
+            'average': this.safeFloat (ticker, 'average'),
+            'baseVolume': this.safeFloat (ticker, 'volume'),
             'quoteVolume': undefined,
             'info': ticker,
         };
@@ -187,21 +190,20 @@ module.exports = class btcturk extends Exchange {
     }
 
     async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
-        let method = 'privatePost' + this.capitalize (side);
+        await this.loadMarkets ();
         let order = {
-            'Type': (side === 'buy') ? 'BuyBtc' : 'SelBtc',
-            'IsMarketOrder': (type === 'market') ? 1 : 0,
+            'PairSymbol': this.marketId (symbol),
+            'OrderType': (side === 'buy') ? 0 : 1,
+            'OrderMethod': (type === 'market') ? 1 : 0,
         };
         if (type === 'market') {
-            if (side === 'buy')
-                order['Total'] = amount;
-            else
-                order['Amount'] = amount;
+            if (!('Total' in params))
+                throw new ExchangeError (this.id + ' createOrder requires the "Total" extra parameter for market orders (amount and price are both ignored)');
         } else {
             order['Price'] = price;
             order['Amount'] = amount;
         }
-        let response = await this[method] (this.extend (order, params));
+        let response = await this.privatePostExchange (this.extend (order, params));
         return {
             'info': response,
             'id': response['id'],

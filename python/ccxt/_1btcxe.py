@@ -114,24 +114,28 @@ class _1btcxe (Exchange):
             'currency': self.market_id(symbol),
         }, params))
         ticker = response['stats']
+        last = self.safe_float(ticker, 'last_price')
         return {
             'symbol': symbol,
             'timestamp': None,
             'datetime': None,
-            'high': float(ticker['max']),
-            'low': float(ticker['min']),
-            'bid': float(ticker['bid']),
-            'ask': float(ticker['ask']),
+            'high': self.safe_float(ticker, 'max'),
+            'low': self.safe_float(ticker, 'min'),
+            'bid': self.safe_float(ticker, 'bid'),
+            'bidVolume': None,
+            'ask': self.safe_float(ticker, 'ask'),
+            'askVolume': None,
             'vwap': None,
-            'open': float(ticker['open']),
-            'close': None,
-            'first': None,
-            'last': float(ticker['last_price']),
-            'change': float(ticker['daily_change']),
+            'open': self.safe_float(ticker, 'open'),
+            'close': last,
+            'last': last,
+            'previousClose': None,
+            'change': self.safe_float(ticker, 'daily_change'),
             'percentage': None,
             'average': None,
             'baseVolume': None,
-            'quoteVolume': float(ticker['total_btc_traded']),
+            'quoteVolume': self.safe_float(ticker, 'total_btc_traded'),
+            'info': ticker,
         }
 
     def parse_ohlcv(self, ohlcv, market=None, timeframe='1d', since=None, limit=None):
@@ -164,8 +168,8 @@ class _1btcxe (Exchange):
             'order': None,
             'type': None,
             'side': trade['maker_type'],
-            'price': float(trade['price']),
-            'amount': float(trade['amount']),
+            'price': self.safe_float(trade, 'price'),
+            'amount': self.safe_float(trade, 'amount'),
         }
 
     def fetch_trades(self, symbol, since=None, limit=None, params={}):
@@ -195,6 +199,7 @@ class _1btcxe (Exchange):
         return self.privatePostOrdersCancel({'id': id})
 
     def withdraw(self, currency, amount, address, tag=None, params={}):
+        self.check_address(address)
         self.load_markets()
         response = self.privatePostWithdrawalsNew(self.extend({
             'currency': currency,

@@ -19,6 +19,7 @@ from ccxt.base.errors import InsufficientFunds
 from ccxt.base.errors import InvalidOrder
 from ccxt.base.errors import OrderNotFound
 from ccxt.base.errors import DDoSProtection
+from ccxt.base.errors import ExchangeNotAvailable
 
 
 class liqui (Exchange):
@@ -89,6 +90,9 @@ class liqui (Exchange):
                     'deposit': {},
                 },
             },
+            'commonCurrencies': {
+                'DSH': 'DASH',
+            },
             'exceptions': {
                 '803': InvalidOrder,  # "Count could not be less than 0.001."(selling below minAmount)
                 '804': InvalidOrder,  # "Count could not be more than 10000."(buying above maxAmount)
@@ -116,20 +120,6 @@ class liqui (Exchange):
             'rate': rate,
             'cost': cost,
         }
-
-    def common_currency_code(self, currency):
-        if not self.substituteCommonCurrencyCodes:
-            return currency
-        if currency == 'XBT':
-            return 'BTC'
-        if currency == 'BCC':
-            return 'BCH'
-        if currency == 'DRK':
-            return 'DASH'
-        # they misspell DASH as dsh :/
-        if currency == 'DSH':
-            return 'DASH'
-        return currency
 
     def get_base_quote_from_market_id(self, id):
         uppercase = id.upper()
@@ -177,7 +167,6 @@ class liqui (Exchange):
                 'quote': quote,
                 'active': active,
                 'taker': market['fee'] / 100,
-                'lot': amountLimits['min'],
                 'precision': precision,
                 'limits': limits,
                 'info': market,
@@ -221,10 +210,7 @@ class liqui (Exchange):
         if not market_id_in_reponse:
             raise ExchangeError(self.id + ' ' + market['symbol'] + ' order book is empty or not available')
         orderbook = response[market['id']]
-        result = self.parse_order_book(orderbook)
-        result['bids'] = self.sort_by(result['bids'], 0, True)
-        result['asks'] = self.sort_by(result['asks'], 0)
-        return result
+        return self.parse_order_book(orderbook)
 
     async def fetch_order_books(self, symbols=None, params={}):
         await self.load_markets()
@@ -257,6 +243,7 @@ class liqui (Exchange):
         symbol = None
         if market:
             symbol = market['symbol']
+        last = self.safe_float(ticker, 'last')
         return {
             'symbol': symbol,
             'timestamp': timestamp,
@@ -264,12 +251,14 @@ class liqui (Exchange):
             'high': self.safe_float(ticker, 'high'),
             'low': self.safe_float(ticker, 'low'),
             'bid': self.safe_float(ticker, 'buy'),
+            'bidVolume': None,
             'ask': self.safe_float(ticker, 'sell'),
+            'askVolume': None,
             'vwap': None,
             'open': None,
-            'close': None,
-            'first': None,
-            'last': self.safe_float(ticker, 'last'),
+            'close': last,
+            'last': last,
+            'previousClose': None,
             'change': None,
             'percentage': None,
             'average': self.safe_float(ticker, 'avg'),
@@ -374,21 +363,26 @@ class liqui (Exchange):
             'amount': self.amount_to_precision(symbol, amount),
             'rate': self.price_to_precision(symbol, price),
         }
-        response = await self.privatePostTrade(self.extend(request, params))
-        id = self.safe_string(response['return'], self.get_order_id_key())
-        timestamp = self.milliseconds()
         price = float(price)
         amount = float(amount)
+        response = await self.privatePostTrade(self.extend(request, params))
+        id = None
         status = 'open'
-        if id == '0':
-            id = self.safe_string(response['return'], 'init_order_id')
-            status = 'closed'
-        filled = self.safe_float(response['return'], 'received', 0.0)
-        remaining = self.safe_float(response['return'], 'remains', amount)
+        filled = 0.0
+        remaining = amount
+        if 'return' in response:
+            id = self.safe_string(response['return'], self.get_order_id_key())
+            if id == '0':
+                id = self.safe_string(response['return'], 'init_order_id')
+                status = 'closed'
+            filled = self.safe_float(response['return'], 'received', 0.0)
+            remaining = self.safe_float(response['return'], 'remains', amount)
+        timestamp = self.milliseconds()
         order = {
             'id': id,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
+            'lastTradeTimestamp': None,
             'status': status,
             'symbol': symbol,
             'type': type,
@@ -418,15 +412,22 @@ class liqui (Exchange):
             self.orders[id]['status'] = 'canceled'
         return response
 
+    def parse_order_status(self, status):
+        statuses = {
+            '0': 'open',
+            '1': 'closed',
+            '2': 'canceled',
+            '3': 'canceled',  # or partially-filled and still open? https://github.com/ccxt/ccxt/issues/1594
+        }
+        if status in statuses:
+            return statuses[status]
+        return status
+
     def parse_order(self, order, market=None):
         id = str(order['id'])
-        status = self.safe_integer(order, 'status')
-        if status == 0:
-            status = 'open'
-        elif status == 1:
-            status = 'closed'
-        elif (status == 2) or (status == 3):
-            status = 'canceled'
+        status = self.safe_string(order, 'status')
+        if status != 'None':
+            status = self.parse_order_status(status)
         timestamp = int(order['timestamp_created']) * 1000
         symbol = None
         if not market:
@@ -456,6 +457,7 @@ class liqui (Exchange):
             'symbol': symbol,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
+            'lastTradeTimestamp': None,
             'type': 'limit',
             'side': order['type'],
             'price': price,
@@ -491,38 +493,37 @@ class liqui (Exchange):
 
     def update_cached_orders(self, openOrders, symbol):
         # update local cache with open orders
+        # self will add unseen orders and overwrite existing ones
         for j in range(0, len(openOrders)):
             id = openOrders[j]['id']
             self.orders[id] = openOrders[j]
         openOrdersIndexedById = self.index_by(openOrders, 'id')
         cachedOrderIds = list(self.orders.keys())
-        result = []
         for k in range(0, len(cachedOrderIds)):
             # match each cached order to an order in the open orders array
             # possible reasons why a cached order may be missing in the open orders array:
             # - order was closed or canceled -> update cache
             # - symbol mismatch(e.g. cached BTC/USDT, fetched ETH/USDT) -> skip
-            id = cachedOrderIds[k]
-            order = self.orders[id]
-            result.append(order)
-            if not(id in list(openOrdersIndexedById.keys())):
+            cachedOrderId = cachedOrderIds[k]
+            cachedOrder = self.orders[cachedOrderId]
+            if not(cachedOrderId in list(openOrdersIndexedById.keys())):
                 # cached order is not in open orders array
                 # if we fetched orders by symbol and it doesn't match the cached order -> won't update the cached order
-                if symbol is not None and symbol != order['symbol']:
+                if symbol is not None and symbol != cachedOrder['symbol']:
                     continue
-                # order is cached but not present in the list of open orders -> mark the cached order as closed
-                if order['status'] == 'open':
-                    order = self.extend(order, {
+                # cached order is absent from the list of open orders -> mark the cached order as closed
+                if cachedOrder['status'] == 'open':
+                    cachedOrder = self.extend(cachedOrder, {
                         'status': 'closed',  # likewise it might have been canceled externally(unnoticed by "us")
                         'cost': None,
-                        'filled': order['amount'],
+                        'filled': cachedOrder['amount'],
                         'remaining': 0.0,
                     })
-                    if order['cost'] is None:
-                        if order['filled'] is not None:
-                            order['cost'] = order['filled'] * order['price']
-                    self.orders[id] = order
-        return result
+                    if cachedOrder['cost'] is None:
+                        if cachedOrder['filled'] is not None:
+                            cachedOrder['cost'] = cachedOrder['filled'] * cachedOrder['price']
+                    self.orders[cachedOrderId] = cachedOrder
+        return self.to_array(self.orders)
 
     async def fetch_orders(self, symbol=None, since=None, limit=None, params={}):
         if 'fetchOrdersRequiresSymbol' in self.options:
@@ -532,7 +533,7 @@ class liqui (Exchange):
         await self.load_markets()
         request = {}
         market = None
-        if symbol:
+        if symbol is not None:
             market = self.market(symbol)
             request['pair'] = market['id']
         response = await self.privatePostActiveOrders(self.extend(request, params))
@@ -541,24 +542,16 @@ class liqui (Exchange):
         if 'return' in response:
             openOrders = self.parse_orders(response['return'], market)
         allOrders = self.update_cached_orders(openOrders, symbol)
-        result = self.filter_orders_by_symbol(allOrders, symbol)
+        result = self.filter_by_symbol(allOrders, symbol)
         return self.filter_by_since_limit(result, since, limit)
 
     async def fetch_open_orders(self, symbol=None, since=None, limit=None, params={}):
         orders = await self.fetch_orders(symbol, since, limit, params)
-        result = []
-        for i in range(0, len(orders)):
-            if orders[i]['status'] == 'open':
-                result.append(orders[i])
-        return result
+        return self.filter_by(orders, 'status', 'open')
 
     async def fetch_closed_orders(self, symbol=None, since=None, limit=None, params={}):
         orders = await self.fetch_orders(symbol, since, limit, params)
-        result = []
-        for i in range(0, len(orders)):
-            if orders[i]['status'] == 'closed':
-                result.append(orders[i])
-        return result
+        return self.filter_by(orders, 'status', 'closed')
 
     async def fetch_my_trades(self, symbol=None, since=None, limit=None, params={}):
         await self.load_markets()
@@ -587,6 +580,7 @@ class liqui (Exchange):
         return self.parse_trades(trades, market, since, limit)
 
     async def withdraw(self, currency, amount, address, tag=None, params={}):
+        self.check_address(address)
         await self.load_markets()
         response = await self.privatePostWithdrawCoin(self.extend({
             'coinName': currency,
@@ -620,10 +614,21 @@ class liqui (Exchange):
                 'Key': self.apiKey,
                 'Sign': signature,
             }
-        else:
+        elif api == 'public':
             url += self.get_version_string() + '/' + self.implode_params(path, params)
             if query:
                 url += '?' + self.urlencode(query)
+        else:
+            url += '/' + self.implode_params(path, params)
+            if method == 'GET':
+                if query:
+                    url += '?' + self.urlencode(query)
+            else:
+                if query:
+                    body = self.json(query)
+                    headers = {
+                        'Content-Type': 'application/json',
+                    }
         return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
     def handle_errors(self, httpCode, reason, url, method, headers, body):
@@ -677,6 +682,8 @@ class liqui (Exchange):
                     # in fact, we can use the same .exceptions with string-keys to save some loc here
                     if message == 'invalid api key':
                         raise AuthenticationError(feedback)
+                    elif message == 'invalid sign':
+                        raise AuthenticationError(feedback)
                     elif message == 'api key dont have trade permission':
                         raise AuthenticationError(feedback)
                     elif message.find('invalid parameter') >= 0:  # errorCode 0, returned on buy(symbol, 0, 0)
@@ -686,8 +693,10 @@ class liqui (Exchange):
                     elif message == 'Requests too often':
                         raise DDoSProtection(feedback)
                     elif message == 'not available':
-                        raise DDoSProtection(feedback)
+                        raise ExchangeNotAvailable(feedback)
+                    elif message == 'data unavailable':
+                        raise ExchangeNotAvailable(feedback)
                     elif message == 'external service unavailable':
-                        raise DDoSProtection(feedback)
+                        raise ExchangeNotAvailable(feedback)
                     else:
                         raise ExchangeError(self.id + ' unknown "error" value: ' + self.json(response))

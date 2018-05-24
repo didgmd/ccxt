@@ -92,8 +92,8 @@ class lakebtc (Exchange):
         for i in range(0, len(ids)):
             id = ids[i]
             code = id
-            if id in self.currencies:
-                currency = self.currencies[id]
+            if id in self.currencies_by_id:
+                currency = self.currencies_by_id[id]
                 code = currency['code']
             balance = float(balances[id])
             account = {
@@ -116,6 +116,7 @@ class lakebtc (Exchange):
         symbol = None
         if market is not None:
             symbol = market['symbol']
+        last = self.safe_float(ticker, 'last')
         return {
             'symbol': symbol,
             'timestamp': timestamp,
@@ -123,12 +124,14 @@ class lakebtc (Exchange):
             'high': self.safe_float(ticker, 'high'),
             'low': self.safe_float(ticker, 'low'),
             'bid': self.safe_float(ticker, 'bid'),
+            'bidVolume': None,
             'ask': self.safe_float(ticker, 'ask'),
+            'askVolume': None,
             'vwap': None,
             'open': None,
-            'close': None,
-            'first': None,
-            'last': self.safe_float(ticker, 'last'),
+            'close': last,
+            'last': last,
+            'previousClose': None,
             'change': None,
             'percentage': None,
             'average': None,
@@ -169,8 +172,8 @@ class lakebtc (Exchange):
             'order': None,
             'type': None,
             'side': None,
-            'price': float(trade['price']),
-            'amount': float(trade['amount']),
+            'price': self.safe_float(trade, 'price'),
+            'amount': self.safe_float(trade, 'amount'),
         }
 
     async def fetch_trades(self, symbol, since=None, limit=None, params={}):
@@ -181,14 +184,14 @@ class lakebtc (Exchange):
         }, params))
         return self.parse_trades(response, market, since, limit)
 
-    async def create_order(self, market, type, side, amount, price=None, params={}):
+    async def create_order(self, symbol, type, side, amount, price=None, params={}):
         await self.load_markets()
         if type == 'market':
             raise ExchangeError(self.id + ' allows limit orders only')
         method = 'privatePost' + self.capitalize(side) + 'Order'
-        marketId = self.market_id(market)
+        market = self.market(symbol)
         order = {
-            'params': [price, amount, marketId],
+            'params': [price, amount, market['id']],
         }
         response = await getattr(self, method)(self.extend(order, params))
         return {

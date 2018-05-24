@@ -15,7 +15,6 @@ module.exports = class okex extends okcoinusd {
             'has': {
                 'CORS': false,
                 'futures': true,
-                'hasFetchTickers': true,
                 'fetchTickers': true,
             },
             'urls': {
@@ -26,21 +25,17 @@ module.exports = class okex extends okcoinusd {
                     'private': 'https://www.okex.com/api',
                 },
                 'www': 'https://www.okex.com',
-                'doc': 'https://www.okex.com/rest_getStarted.html',
+                'doc': 'https://github.com/okcoin-okex/API-docs-OKEx.com',
                 'fees': 'https://www.okex.com/fees.html',
             },
+            'commonCurrencies': {
+                'FAIR': 'FairGame',
+                'HMC': 'Hi Mutual Society',
+                'MAG': 'Maggie',
+                'NANO': 'XRB',
+                'YOYO': 'YOYOW',
+            },
         });
-    }
-
-    commonCurrencyCode (currency) {
-        const currencies = {
-            'FAIR': 'FairGame',
-            'YOYO': 'YOYOW',
-            'NANO': 'XRB',
-        };
-        if (currency in currencies)
-            return currencies[currency];
-        return currency;
     }
 
     calculateFee (symbol, type, side, amount, price, takerOrMaker = 'taker', params = {}) {

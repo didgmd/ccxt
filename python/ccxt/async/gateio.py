@@ -4,8 +4,17 @@
 # https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#how-to-contribute-code
 
 from ccxt.async.base.exchange import Exchange
+
+# -----------------------------------------------------------------------------
+
+try:
+    basestring  # Python 3
+except NameError:
+    basestring = str  # Python 2
 import hashlib
+import math
 from ccxt.base.errors import ExchangeError
+from ccxt.base.errors import InvalidAddress
 
 
 class gateio (Exchange):
@@ -33,7 +42,10 @@ class gateio (Exchange):
                 },
                 'www': 'https://gate.io/',
                 'doc': 'https://gate.io/api2',
-                'fees': 'https://gate.io/fee',
+                'fees': [
+                    'https://gate.io/fee',
+                    'https://support.gate.io/hc/en-us/articles/115003577673',
+                ],
             },
             'api': {
                 'public': {
@@ -66,6 +78,14 @@ class gateio (Exchange):
                     ],
                 },
             },
+            'fees': {
+                'trading': {
+                    'tierBased': True,
+                    'percentage': True,
+                    'maker': 0.002,
+                    'taker': 0.002,
+                },
+            },
         })
 
     async def fetch_markets(self):
@@ -86,7 +106,7 @@ class gateio (Exchange):
             quote = self.common_currency_code(quote)
             symbol = base + '/' + quote
             precision = {
-                'amount': details['decimal_places'],
+                'amount': 8,
                 'price': details['decimal_places'],
             }
             amountLimits = {
@@ -94,12 +114,17 @@ class gateio (Exchange):
                 'max': None,
             }
             priceLimits = {
-                'min': None,
+                'min': math.pow(10, -details['decimal_places']),
+                'max': None,
+            }
+            costLimits = {
+                'min': amountLimits['min'] * priceLimits['min'],
                 'max': None,
             }
             limits = {
                 'amount': amountLimits,
                 'price': priceLimits,
+                'cost': costLimits,
             }
             result.append({
                 'id': id,
@@ -138,33 +163,34 @@ class gateio (Exchange):
         orderbook = await self.publicGetOrderBookId(self.extend({
             'id': self.market_id(symbol),
         }, params))
-        result = self.parse_order_book(orderbook)
-        result['asks'] = self.sort_by(result['asks'], 0)
-        return result
+        return self.parse_order_book(orderbook)
 
     def parse_ticker(self, ticker, market=None):
         timestamp = self.milliseconds()
         symbol = None
         if market:
             symbol = market['symbol']
+        last = self.safe_float(ticker, 'last')
         return {
             'symbol': symbol,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
-            'high': float(ticker['high24hr']),
-            'low': float(ticker['low24hr']),
-            'bid': float(ticker['highestBid']),
-            'ask': float(ticker['lowestAsk']),
+            'high': self.safe_float(ticker, 'high24hr'),
+            'low': self.safe_float(ticker, 'low24hr'),
+            'bid': self.safe_float(ticker, 'highestBid'),
+            'bidVolume': None,
+            'ask': self.safe_float(ticker, 'lowestAsk'),
+            'askVolume': None,
             'vwap': None,
             'open': None,
-            'close': None,
-            'first': None,
-            'last': float(ticker['last']),
-            'change': float(ticker['percentChange']),
+            'close': last,
+            'last': last,
+            'previousClose': None,
+            'change': self.safe_float(ticker, 'percentChange'),
             'percentage': None,
             'average': None,
-            'baseVolume': float(ticker['quoteVolume']),
-            'quoteVolume': float(ticker['baseVolume']),
+            'baseVolume': self.safe_float(ticker, 'quoteVolume'),
+            'quoteVolume': self.safe_float(ticker, 'baseVolume'),
             'info': ticker,
         }
 
@@ -209,7 +235,7 @@ class gateio (Exchange):
             'symbol': market['symbol'],
             'type': None,
             'side': trade['type'],
-            'price': trade['rate'],
+            'price': self.safe_float(trade, 'rate'),
             'amount': self.safe_float(trade, 'amount'),
         }
 
@@ -249,6 +275,8 @@ class gateio (Exchange):
         address = None
         if 'addr' in response:
             address = self.safe_string(response, 'addr')
+        if (address is not None) and(address.find('address') >= 0):
+            raise InvalidAddress(self.id + ' queryDepositAddress ' + address)
         return {
             'currency': currency,
             'address': address,
@@ -263,6 +291,7 @@ class gateio (Exchange):
         return await self.query_deposit_address('Deposit', currency, params)
 
     async def withdraw(self, currency, amount, address, tag=None, params={}):
+        self.check_address(address)
         await self.load_markets()
         response = await self.privatePostWithdraw(self.extend({
             'currency': currency.lower(),
@@ -297,6 +326,13 @@ class gateio (Exchange):
     async def request(self, path, api='public', method='GET', params={}, headers=None, body=None):
         response = await self.fetch2(path, api, method, params, headers, body)
         if 'result' in response:
-            if response['result'] != 'true':
-                raise ExchangeError(self.id + ' ' + self.json(response))
+            result = response['result']
+            message = self.id + ' ' + self.json(response)
+            if result is None:
+                raise ExchangeError(message)
+            if isinstance(result, basestring):
+                if result != 'true':
+                    raise ExchangeError(message)
+            elif not result:
+                raise ExchangeError(message)
         return response

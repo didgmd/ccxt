@@ -7,8 +7,8 @@ from ccxt.async.bitfinex import bitfinex
 import hashlib
 import math
 from ccxt.base.errors import ExchangeError
-from ccxt.base.errors import NotSupported
 from ccxt.base.errors import InsufficientFunds
+from ccxt.base.errors import NotSupported
 
 
 class bitfinex2 (bitfinex):
@@ -22,15 +22,21 @@ class bitfinex2 (bitfinex):
             # new metainfo interface
             'has': {
                 'CORS': True,
+                'createLimitOrder': False,
+                'createMarketOrder': False,
                 'createOrder': False,
+                'deposit': False,
+                'editOrder': False,
+                'fetchDepositAddress': False,
+                'fetchClosedOrders': False,
+                'fetchFundingFees': False,
                 'fetchMyTrades': False,
                 'fetchOHLCV': True,
-                'fetchTickers': True,
-                'fetchOrder': True,
                 'fetchOpenOrders': False,
-                'fetchClosedOrders': False,
+                'fetchOrder': True,
+                'fetchTickers': True,
+                'fetchTradingFees': False,
                 'withdraw': True,
-                'deposit': False,
             },
             'timeframes': {
                 '1m': '1m',
@@ -113,6 +119,7 @@ class bitfinex2 (bitfinex):
                         'auth/w/alert/set',
                         'auth/w/alert/{type}:{symbol}:{price}/del',
                         'auth/calc/order/avail',
+                        'auth/r/ledgers/{symbol}/hist',
                     ],
                 },
             },
@@ -155,15 +162,6 @@ class bitfinex2 (bitfinex):
             },
         })
 
-    def common_currency_code(self, currency):
-        currencies = {
-            'DSH': 'DASH',  # Bitfinex names Dash as DSH, instead of DASH
-            'QTM': 'QTUM',
-            'IOT': 'IOTA',
-            'DAT': 'DATA',
-        }
-        return currencies[currency] if (currency in list(currencies.keys())) else currency
-
     def is_fiat(self, code):
         fiat = {
             'USD': 'USD',
@@ -172,9 +170,7 @@ class bitfinex2 (bitfinex):
         return(code in list(fiat.keys()))
 
     def get_currency_id(self, code):
-        isFiat = self.is_fiat(code)
-        prefix = 'f' if isFiat else 't'
-        return prefix + code
+        return 'f' + code
 
     async def fetch_markets(self):
         markets = await self.v1GetSymbolsDetails()
@@ -196,8 +192,8 @@ class bitfinex2 (bitfinex):
             }
             limits = {
                 'amount': {
-                    'min': float(market['minimum_order_size']),
-                    'max': float(market['maximum_order_size']),
+                    'min': self.safe_float(market, 'minimum_order_size'),
+                    'max': self.safe_float(market, 'maximum_order_size'),
                 },
                 'price': {
                     'min': math.pow(10, -precision['price']),
@@ -224,6 +220,7 @@ class bitfinex2 (bitfinex):
         return result
 
     async def fetch_balance(self, params={}):
+        await self.load_markets()
         response = await self.privatePostAuthRWallets()
         balanceType = self.safe_string(params, 'type', 'exchange')
         result = {'info': response}
@@ -234,19 +231,29 @@ class bitfinex2 (bitfinex):
             total = balance[2]
             available = balance[4]
             if accountType == balanceType:
-                if currency[0] == 't':
+                code = currency
+                if currency in self.currencies_by_id:
+                    code = self.currencies_by_id[currency]['code']
+                elif currency[0] == 't':
                     currency = currency[1:]
-                uppercase = currency.upper()
-                uppercase = self.common_currency_code(uppercase)
+                    code = currency.upper()
+                    code = self.common_currency_code(code)
                 account = self.account()
-                account['free'] = available
                 account['total'] = total
-                if account['free']:
+                if not available:
+                    if available == 0:
+                        account['free'] = 0
+                        account['used'] = total
+                    else:
+                        account['free'] = None
+                else:
+                    account['free'] = available
                     account['used'] = account['total'] - account['free']
-                result[uppercase] = account
+                result[code] = account
         return self.parse_balance(result)
 
     async def fetch_order_book(self, symbol, limit=None, params={}):
+        await self.load_markets()
         orderbook = await self.publicGetBookSymbolPrecision(self.extend({
             'symbol': self.market_id(symbol),
             'precision': 'R0',
@@ -257,6 +264,7 @@ class bitfinex2 (bitfinex):
             'asks': [],
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
+            'nonce': None,
         }
         for i in range(0, len(orderbook)):
             order = orderbook[i]
@@ -275,6 +283,7 @@ class bitfinex2 (bitfinex):
         if market:
             symbol = market['symbol']
         length = len(ticker)
+        last = ticker[length - 4]
         return {
             'symbol': symbol,
             'timestamp': timestamp,
@@ -282,12 +291,14 @@ class bitfinex2 (bitfinex):
             'high': ticker[length - 2],
             'low': ticker[length - 1],
             'bid': ticker[length - 10],
+            'bidVolume': None,
             'ask': ticker[length - 8],
+            'askVolume': None,
             'vwap': None,
             'open': None,
-            'close': None,
-            'first': None,
-            'last': ticker[length - 4],
+            'close': last,
+            'last': last,
+            'previousClose': None,
             'change': ticker[length - 6],
             'percentage': ticker[length - 5],
             'average': None,
@@ -297,6 +308,7 @@ class bitfinex2 (bitfinex):
         }
 
     async def fetch_tickers(self, symbols=None, params={}):
+        await self.load_markets()
         tickers = await self.publicGetTickers(self.extend({
             'symbols': ','.join(self.ids),
         }, params))
@@ -310,6 +322,7 @@ class bitfinex2 (bitfinex):
         return result
 
     async def fetch_ticker(self, symbol, params={}):
+        await self.load_markets()
         market = self.markets[symbol]
         ticker = await self.publicGetTickerSymbol(self.extend({
             'symbol': market['id'],
@@ -334,10 +347,11 @@ class bitfinex2 (bitfinex):
         }
 
     async def fetch_trades(self, symbol, since=None, limit=120, params={}):
+        await self.load_markets()
         market = self.market(symbol)
         request = {
             'symbol': market['id'],
-            'sort': 1,
+            'sort': '-1',
             'limit': limit,  # default = max = 120
         }
         if since is not None:
@@ -347,17 +361,18 @@ class bitfinex2 (bitfinex):
         return self.parse_trades(trades, market, None, limit)
 
     async def fetch_ohlcv(self, symbol, timeframe='1m', since=None, limit=100, params={}):
+        await self.load_markets()
         market = self.market(symbol)
+        if since is None:
+            since = self.milliseconds() - self.parse_timeframe(timeframe) * limit * 1000
         request = {
             'symbol': market['id'],
             'timeframe': self.timeframes[timeframe],
             'sort': 1,
             'limit': limit,
+            'start': since,
         }
-        if since is not None:
-            request['start'] = since
-        request = self.extend(request, params)
-        response = await self.publicGetCandlesTradeTimeframeSymbolHist(request)
+        response = await self.publicGetCandlesTradeTimeframeSymbolHist(self.extend(request, params))
         return self.parse_ohlcvs(response, market, timeframe, since, limit)
 
     async def create_order(self, symbol, type, side, amount, price=None, params={}):
@@ -369,8 +384,25 @@ class bitfinex2 (bitfinex):
     async def fetch_order(self, id, symbol=None, params={}):
         raise NotSupported(self.id + ' fetchOrder not implemented yet')
 
+    async def fetch_deposit_address(self, currency, params={}):
+        raise NotSupported(self.id + ' fetchDepositAddress() not implemented yet.')
+
     async def withdraw(self, currency, amount, address, tag=None, params={}):
         raise NotSupported(self.id + ' withdraw not implemented yet')
+
+    async def fetch_my_trades(self, symbol=None, since=None, limit=25, params={}):
+        await self.load_markets()
+        market = self.market(symbol)
+        request = {
+            'symbol': market['id'],
+            'limit': limit,
+            'end': self.seconds(),
+        }
+        if since is not None:
+            request['start'] = int(since / 1000)
+        response = await self.privatePostAuthRTradesSymbolHist(self.extend(request, params))
+        # return self.parse_trades(response, market, since, limit)  # not implemented yet for bitfinex v2
+        return response
 
     def nonce(self):
         return self.milliseconds()

@@ -47,15 +47,15 @@ class btcturk (Exchange):
                         'userTransactions',  # ?offset=0&limit=25&sort=asc
                     ],
                     'post': [
-                        'buy',
+                        'exchange',
                         'cancelOrder',
-                        'sell',
                     ],
                 },
             },
             'markets': {
                 'BTC/TRY': {'id': 'BTCTRY', 'symbol': 'BTC/TRY', 'base': 'BTC', 'quote': 'TRY', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18},
                 'ETH/TRY': {'id': 'ETHTRY', 'symbol': 'ETH/TRY', 'base': 'ETH', 'quote': 'TRY', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18},
+                'XRP/TRY': {'id': 'XRPTRY', 'symbol': 'XRP/TRY', 'base': 'XRP', 'quote': 'TRY', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18},
                 'ETH/BTC': {'id': 'ETHBTC', 'symbol': 'ETH/BTC', 'base': 'ETH', 'quote': 'BTC', 'maker': 0.002 * 1.18, 'taker': 0.0035 * 1.18},
             },
         })
@@ -92,23 +92,26 @@ class btcturk (Exchange):
         if market:
             symbol = market['symbol']
         timestamp = int(ticker['timestamp']) * 1000
+        last = self.safe_float(ticker, 'last')
         return {
             'symbol': symbol,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
-            'high': float(ticker['high']),
-            'low': float(ticker['low']),
-            'bid': float(ticker['bid']),
-            'ask': float(ticker['ask']),
+            'high': self.safe_float(ticker, 'high'),
+            'low': self.safe_float(ticker, 'low'),
+            'bid': self.safe_float(ticker, 'bid'),
+            'bidVolume': None,
+            'ask': self.safe_float(ticker, 'ask'),
+            'askVolume': None,
             'vwap': None,
-            'open': float(ticker['open']),
-            'close': None,
-            'first': None,
-            'last': float(ticker['last']),
+            'open': self.safe_float(ticker, 'open'),
+            'close': last,
+            'last': last,
+            'previousClose': None,
             'change': None,
             'percentage': None,
-            'average': float(ticker['average']),
-            'baseVolume': float(ticker['volume']),
+            'average': self.safe_float(ticker, 'average'),
+            'baseVolume': self.safe_float(ticker, 'volume'),
             'quoteVolume': None,
             'info': ticker,
         }
@@ -178,20 +181,19 @@ class btcturk (Exchange):
         return self.parse_ohlcvs(response, market, timeframe, since, limit)
 
     async def create_order(self, symbol, type, side, amount, price=None, params={}):
-        method = 'privatePost' + self.capitalize(side)
+        await self.load_markets()
         order = {
-            'Type': 'BuyBtc' if (side == 'buy') else 'SelBtc',
-            'IsMarketOrder': 1 if (type == 'market') else 0,
+            'PairSymbol': self.market_id(symbol),
+            'OrderType': 0 if (side == 'buy') else 1,
+            'OrderMethod': 1 if (type == 'market') else 0,
         }
         if type == 'market':
-            if side == 'buy':
-                order['Total'] = amount
-            else:
-                order['Amount'] = amount
+            if not('Total' in list(params.keys())):
+                raise ExchangeError(self.id + ' createOrder requires the "Total" extra parameter for market orders(amount and price are both ignored)')
         else:
             order['Price'] = price
             order['Amount'] = amount
-        response = await getattr(self, method)(self.extend(order, params))
+        response = await self.privatePostExchange(self.extend(order, params))
         return {
             'info': response,
             'id': response['id'],

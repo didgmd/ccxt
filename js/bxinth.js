@@ -68,6 +68,10 @@ module.exports = class bxinth extends Exchange {
                     'maker': 0.25 / 100,
                 },
             },
+            'commonCurrencies': {
+                'DAS': 'DASH',
+                'DOG': 'DOGE',
+            },
         });
     }
 
@@ -92,15 +96,6 @@ module.exports = class bxinth extends Exchange {
             });
         }
         return result;
-    }
-
-    commonCurrencyCode (currency) {
-        // why would they use three letters instead of four for currency codes
-        if (currency === 'DAS')
-            return 'DASH';
-        if (currency === 'DOG')
-            return 'DOGE';
-        return currency;
     }
 
     async fetchBalance (params = {}) {
@@ -136,6 +131,7 @@ module.exports = class bxinth extends Exchange {
         let symbol = undefined;
         if (market)
             symbol = market['symbol'];
+        let last = this.safeFloat (ticker, 'last_price');
         return {
             'symbol': symbol,
             'timestamp': timestamp,
@@ -143,16 +139,18 @@ module.exports = class bxinth extends Exchange {
             'high': undefined,
             'low': undefined,
             'bid': parseFloat (ticker['orderbook']['bids']['highbid']),
+            'bidVolume': undefined,
             'ask': parseFloat (ticker['orderbook']['asks']['highbid']),
+            'askVolume': undefined,
             'vwap': undefined,
             'open': undefined,
-            'close': undefined,
-            'first': undefined,
-            'last': parseFloat (ticker['last_price']),
-            'change': parseFloat (ticker['change']),
+            'close': last,
+            'last': last,
+            'previousClose': undefined,
+            'change': this.safeFloat (ticker, 'change'),
             'percentage': undefined,
             'average': undefined,
-            'baseVolume': parseFloat (ticker['volume_24hours']),
+            'baseVolume': this.safeFloat (ticker, 'volume_24hours'),
             'quoteVolume': undefined,
             'info': ticker,
         };
@@ -195,8 +193,8 @@ module.exports = class bxinth extends Exchange {
             'symbol': market['symbol'],
             'type': undefined,
             'side': trade['trade_type'],
-            'price': parseFloat (trade['rate']),
-            'amount': parseFloat (trade['amount']),
+            'price': this.safeFloat (trade, 'rate'),
+            'amount': this.safeFloat (trade, 'amount'),
         };
     }
 
@@ -269,7 +267,7 @@ module.exports = class bxinth extends Exchange {
         }
         let response = this.privatePostGetorders (this.extend (request, params));
         let orders = this.parseOrders (response['orders'], market, since, limit);
-        return this.filterOrdersBySymbol (orders, symbol);
+        return this.filterBySymbol (orders, symbol);
     }
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {

@@ -1,17 +1,12 @@
 "use strict";
 
 const fs   = require ('fs')
-const path = require ('path')
-const log  = require ('ololog')
-const ansi = require ('ansicolor').nice
-
-// ----------------------------------------------------------------------------
-
-const { capitalize } = require ('./js/base/functions.js')
-
-// ----------------------------------------------------------------------------
-
-const errors = require ('./js/base/errors.js')
+    , path = require ('path')
+    , log  = require ('ololog')
+    , ansi = require ('ansicolor').nice
+    , errors = require ('./js/base/errors.js')
+    , { unCamelCase, capitalize } = require ('./js/base/functions.js')
+    , { precisionConstants } = require ('./js/base/functions/number.js')
 
 // ---------------------------------------------------------------------------
 
@@ -47,6 +42,8 @@ const commonRegexes = [
     [ /\.safeInteger\s/g, '.safe_integer'],
     [ /\.safeString\s/g, '.safe_string'],
     [ /\.safeValue\s/g, '.safe_value'],
+    [ /\.inArray\s/g, '.in_array'],
+    [ /\.toArray\s/g, '.to_array'],
     [ /\.arrayConcat\s/g, '.array_concat'],
     [ /\.binaryConcat\s/g, '.binary_concat'],
     [ /\.binaryToString\s/g, '.binary_to_string' ],
@@ -58,6 +55,7 @@ const commonRegexes = [
     [ /\.parseOHLCV\s/g, '.parse_ohlcv'],
     [ /\.parseDate\s/g, '.parse_date'],
     [ /\.parseTicker\s/g, '.parse_ticker'],
+    [ /\.parseTimeframe\s/g, '.parse_timeframe'],
     [ /\.parseTradesData\s/g, '.parse_trades_data'],
     [ /\.parseTrades\s/g, '.parse_trades'],
     [ /\.parseTrade\s/g, '.parse_trade'],
@@ -67,13 +65,17 @@ const commonRegexes = [
     [ /\.parseOrders\s/g, '.parse_orders'],
     [ /\.parseOrderStatus\s/g, '.parse_order_status'],
     [ /\.parseOrder\s/g, '.parse_order'],
+    [ /\.filterByArray\s/g, '.filter_by_array'],
+    [ /\.filterBySymbolSinceLimit\s/g, '.filter_by_symbol_since_limit'],
     [ /\.filterBySinceLimit\s/g, '.filter_by_since_limit'],
-    [ /\.filterOrdersBySymbol\s/g, '.filter_orders_by_symbol'],
+    [ /\.filterBySymbol\s/g, '.filter_by_symbol'],
     [ /\.getVersionString\s/g, '.get_version_string'],
     [ /\.indexBy\s/g, '.index_by'],
     [ /\.sortBy\s/g, '.sort_by'],
     [ /\.filterBy\s/g, '.filter_by'],
     [ /\.groupBy\s/g, '.group_by'],
+    [ /\.findMarket\s/g, '.find_market'],
+    [ /\.findSymbol\s/g, '.find_symbol'],
     [ /\.marketIds\s/g, '.market_ids'],
     [ /\.marketId\s/g, '.market_id'],
     [ /\.fetchFundingFees\s/g, '.fetch_funding_fees'],
@@ -86,11 +88,13 @@ const commonRegexes = [
     [ /\.fetchOpenOrders\s/g, '.fetch_open_orders'],
     [ /\.fetchOpenOrder\s/g, '.fetch_open_order'],
     [ /\.fetchOrders\s/g, '.fetch_orders'],
+    [ /\.fetchOrderTrades\s/g, '.fetch_order_trades'],
     [ /\.fetchOrder\s/g, '.fetch_order'],
     [ /\.fetchBidsAsks\s/g, '.fetch_bids_asks'],
     [ /\.fetchTickers\s/g, '.fetch_tickers'],
     [ /\.fetchTicker\s/g, '.fetch_ticker'],
     [ /\.fetchCurrencies\s/g, '.fetch_currencies'],
+    [ /\.decimalToPrecision\s/g, '.decimal_to_precision'],
     [ /\.priceToPrecision\s/g, '.price_to_precision'],
     [ /\.amountToPrecision\s/g, '.amount_to_precision'],
     [ /\.amountToString\s/g, '.amount_to_string'],
@@ -112,6 +116,10 @@ const commonRegexes = [
     [ /\.throwExceptionOnError\s/g, '.throw_exception_on_error'],
     [ /\.handleErrors\s/g, '.handle_errors'],
     [ /\.checkRequiredCredentials\s/g, '.check_required_credentials'],
+    [ /\.checkAddress\s/g, '.check_address'],
+    [ /\.convertTradingViewToOHLCV\s/g, '.convert_trading_view_to_ohlcv'],
+    [ /\.convertOHLCVToTradingView\s/g, '.convert_ohlcv_to_trading_view'],
+    [ /\.signBodyWithSecret\s/g, '.sign_body_with_secret'],
 ]
 
 // ----------------------------------------------------------------------------
@@ -162,6 +170,7 @@ const pythonRegexes = [
         [ /\}\s*else\s*\{/g, 'else:' ],
         [ /else\s*[\n]/g, "else:\n" ],
         [ /for\s+\(([a-zA-Z0-9_]+)\s*=\s*([^\;\s]+\s*)\;[^\<\>\=]+(?:\<=|\>=|<|>)\s*(.*)\.length\s*\;[^\)]+\)\s*{/g, 'for $1 in range($2, len($3)):'],
+        [ /for\s+\(([a-zA-Z0-9_]+)\s*=\s*([^\;\s]+\s*)\;[^\<\>\=]+(?:\<=|\>=|<|>)\s*(.*)\s*\;[^\)]+\)\s*{/g, 'for $1 in range($2, $3):'],
         [ /\s\|\|\s/g, ' or ' ],
         [ /\s\&\&\s/g, ' and ' ],
         [ /\!([^\=])/g, 'not $1'],
@@ -186,7 +195,7 @@ const pythonRegexes = [
         [ /Math\.abs\s*\(([^\)]+)\)/g, 'abs($1)' ],
         [ /Math\.pow\s*\(([^\)]+)\)/g, 'math.pow($1)' ],
         [ /Math\.round\s*\(([^\)]+)\)/g, 'int(round($1))' ],
-        [ /Math\.ceil\s*\(([^\)]+)\)/g, 'int(ceil($1))' ],
+        [ /Math\.ceil\s*\(([^\)]+)\)/g, 'int(math.ceil($1))' ],
         [ /Math\.log/g, 'math.log' ],
         [ /(\([^\)]+\)|[^\s]+)\s*\?\s*([^\:]+)\s+\:\s*([^\n]+)/g, '$2 if $1 else $3'],
         [ / \/\//g, ' #' ],
@@ -201,7 +210,7 @@ const pythonRegexes = [
         [ /Math\.(max|min)\s/g, '$1' ],
         [ /console\.log\s/g, 'print'],
         [ /process\.exit\s+/g, 'sys.exit'],
-        [ /([^:+=\s]+) \(/g, '$1(' ], // PEP8 E225 remove whitespaces before left ( round bracket
+        [ /([^:+=\/\*\s-]+) \(/g, '$1(' ], // PEP8 E225 remove whitespaces before left ( round bracket
         [ /\[ /g, '[' ],              // PEP8 E201 remove whitespaces after left [ square bracket
         [ /\{ /g, '{' ],              // PEP8 E201 remove whitespaces after left { bracket
         [ /([^\s]+) \]/g, '$1]' ],    // PEP8 E202 remove whitespaces before right ] square bracket
@@ -258,6 +267,7 @@ const pythonRegexes = [
         [ '([^a-z]+) (' + Object.keys (errors).join ('|') + ')([^\\s])', "$1 '\\\\ccxt\\\\$2'$3" ],
         [ /\}\s+catch \(([\S]+)\) {/g, '} catch (Exception $$$1) {' ],
         [ /for\s+\(([a-zA-Z0-9_]+)\s*=\s*([^\;\s]+\s*)\;[^\<\>\=]+(\<=|\>=|<|>)\s*(.*)\.length\s*\;([^\)]+)\)\s*{/g, 'for ($1 = $2; $1 $3 count ($4);$5) {' ],
+        [ /for\s+\(([a-zA-Z0-9_]+)\s*=\s*([^\;\s]+\s*)\;[^\<\>\=]+(\<=|\>=|<|>)\s*(.*)\s*\;([^\)]+)\)\s*{/g, 'for ($1 = $2; $1 $3 $4;$5) {' ],
         [ /([^\s]+)\.length\;/g, 'is_array ($1) ? count ($1) : 0;' ],
         [ /([^\s\(]+)\.length/g, 'strlen ($1)' ],
         [ /\.push\s*\(([\s\S]+?)\)\;/g, '[] = $1;' ],
@@ -358,12 +368,22 @@ const pythonRegexes = [
                 errorImports.push ('from ccxt.base.errors import ' + error)
         }
 
-        header = header.concat (libraries, errorImports)
+        const precisionImports = []
+
+        for (let constant in precisionConstants) {
+            // const regex = new RegExp ("[^\\']" + error + "[^\\']")
+            if (bodyAsString.indexOf (constant) >= 0) {
+                console.log (constant)
+                precisionImports.push ('from ccxt.base.decimal_to_precision import ' + constant)
+            }
+        }
+
+        header = header.concat (libraries, errorImports, precisionImports)
 
         for (let method of methods) {
             const regex = new RegExp ('self\\.(' + method + ')\\s*\\(', 'g')
             bodyAsString = bodyAsString.replace (regex,
-                (match, p1) => ('self.' + convertMethodNameToUnderscoreNotation (p1) + '('))
+                (match, p1) => ('self.' + unCamelCase (p1) + '('))
         }
 
         header.push ("\n\nclass " + className + ' (' + baseClass + '):')
@@ -388,6 +408,7 @@ const pythonRegexes = [
             "namespace ccxt;\n",
             "// PLEASE DO NOT EDIT THIS FILE, IT IS GENERATED AND WILL BE OVERWRITTEN:",
             "// https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#how-to-contribute-code\n",
+            "use \Exception as Exception; // a common import\n",
             'class ' + className + ' extends ' + baseClass + ' {'    ,
         ]
 
@@ -396,7 +417,7 @@ const pythonRegexes = [
         for (let method of methods) {
             const regex = new RegExp ('this->(' + method + ')\\s*\\(', 'g')
             bodyAsString = bodyAsString.replace (regex,
-                (match, p1) => ('this->' + convertMethodNameToUnderscoreNotation (p1) + ' ('))
+                (match, p1) => ('this->' + unCamelCase (p1) + ' ('))
         }
 
         const footer =[
@@ -412,14 +433,6 @@ const pythonRegexes = [
     const python2Folder = './python/ccxt/'
     const python3Folder = './python/ccxt/async/'
     const phpFolder     = './php/'
-
-    // ----------------------------------------------------------------------------
-
-    function convertMethodNameToUnderscoreNotation (method) {
-        return (method
-            .replace (/[A-Z]+/g, match => capitalize (match.toLowerCase ()))
-            .replace (/[A-Z]/g, match => '_' + match.toLowerCase ()))
-    }
 
     // ----------------------------------------------------------------------------
 
@@ -456,6 +469,10 @@ const pythonRegexes = [
             let methodSignatureRegex = /(async |)([\S]+)\s\(([^)]*)\)\s*{/ // signature line
             let matches = methodSignatureRegex.exec (signature)
 
+            if (!matches) {
+                log.red (methods[i])
+            }
+
             // async or not
             let keyword = matches[1]
             // try {
@@ -472,7 +489,7 @@ const pythonRegexes = [
 
             methodNames.push (method)
 
-            method = convertMethodNameToUnderscoreNotation (method)
+            method = unCamelCase (method)
 
             // method arguments
             let args = matches[3].trim ()

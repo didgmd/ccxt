@@ -4,7 +4,7 @@
 
 # -----------------------------------------------------------------------------
 
-__version__ = '1.10.1169'
+__version__ = '1.14.63'
 
 # -----------------------------------------------------------------------------
 
@@ -14,6 +14,12 @@ from ccxt.base.errors import AuthenticationError
 from ccxt.base.errors import DDoSProtection
 from ccxt.base.errors import RequestTimeout
 from ccxt.base.errors import ExchangeNotAvailable
+from ccxt.base.errors import InvalidAddress
+
+# -----------------------------------------------------------------------------
+
+from ccxt.base.decimal_to_precision import decimal_to_precision
+from ccxt.base.decimal_to_precision import DECIMAL_PLACES
 
 # -----------------------------------------------------------------------------
 
@@ -88,11 +94,10 @@ class Exchange(object):
     verbose = False
     markets = None
     symbols = None
-    precision = {}
-    limits = {}
     fees = {
         'trading': {
             'fee_loaded': False,
+            'percentage': True,  # subclasses should rarely have to redefine this
         },
         'funding': {
             'fee_loaded': False,
@@ -101,17 +106,9 @@ class Exchange(object):
         },
     }
     ids = None
-    currencies = None
     tickers = None
     api = None
     parseJsonResponse = True
-    exceptions = {}
-    headers = {}
-    balance = {}
-    orderbooks = {}
-    orders = {}
-    trades = {}
-    currencies = {}
     proxy = ''
     origin = '*'  # CORS origin
     proxies = None
@@ -123,27 +120,16 @@ class Exchange(object):
     marketsById = None
     markets_by_id = None
     currencies_by_id = None
-    options = {}  # Python does not allow to define properties in run-time with setattr
-
-    hasPublicAPI = True
-    hasPrivateAPI = True
-    hasCORS = False
-    hasFetchTicker = True
-    hasFetchOrderBook = True
-    hasFetchTrades = True
-    hasFetchTickers = False
-    hasFetchOHLCV = False
-    hasDeposit = False
-    hasWithdraw = False
-    hasFetchBalance = True
-    hasFetchOrder = False
-    hasFetchOrders = False
-    hasFetchOpenOrders = False
-    hasFetchClosedOrders = False
-    hasFetchMyTrades = False
-    hasFetchCurrencies = False
-    hasCreateOrder = hasPrivateAPI
-    hasCancelOrder = hasPrivateAPI
+    precision = None
+    limits = None
+    exceptions = None
+    headers = None
+    balance = None
+    orderbooks = None
+    orders = None
+    trades = None
+    currencies = None
+    options = None  # Python does not allow to define properties in run-time with setattr
 
     requiredCredentials = {
         'apiKey': True,
@@ -151,24 +137,31 @@ class Exchange(object):
         'uid': False,
         'login': False,
         'password': False,
+        'twofa': False,  # 2-factor authentication (one-time password key)
     }
 
     # API method metainfo
     has = {
-        'cancelOrder': hasPrivateAPI,
+        'publicAPI': True,
+        'privateAPI': True,
+        'CORS': False,
+        'cancelOrder': True,
         'cancelOrders': False,
         'createDepositAddress': False,
-        'createOrder': hasPrivateAPI,
+        'createOrder': True,
+        'createMarketOrder': True,
+        'createLimitOrder': True,
         'deposit': False,
+        'editOrder': 'emulated',
         'fetchBalance': True,
         'fetchClosedOrders': False,
         'fetchCurrencies': False,
         'fetchDepositAddress': False,
-        'fetchFees': False,
+        'fetchFundingFees': False,
         'fetchL2OrderBook': True,
         'fetchMarkets': True,
         'fetchMyTrades': False,
-        'fetchOHLCV': False,
+        'fetchOHLCV': 'emulated',
         'fetchOpenOrders': False,
         'fetchOrder': False,
         'fetchOrderBook': True,
@@ -177,9 +170,12 @@ class Exchange(object):
         'fetchTicker': True,
         'fetchTickers': False,
         'fetchTrades': True,
+        'fetchTradingFees': False,
         'withdraw': False,
     }
 
+    precisionMode = DECIMAL_PLACES
+    minFundingAddressLength = 1  # used in check_address
     substituteCommonCurrencyCodes = True
     lastRestRequestTimestamp = 0
     lastRestPollTimestamp = 0
@@ -192,7 +188,26 @@ class Exchange(object):
     last_json_response = None
     last_response_headers = None
 
+    commonCurrencies = {
+        'XBT': 'BTC',
+        'BCC': 'BCH',
+        'DRK': 'DASH',
+    }
+
     def __init__(self, config={}):
+
+        self.precision = {} if self.precision is None else self.precision
+        self.limits = {} if self.limits is None else self.limits
+        self.exceptions = {} if self.exceptions is None else self.exceptions
+        self.headers = {} if self.headers is None else self.headers
+        self.balance = {} if self.balance is None else self.balance
+        self.orderbooks = {} if self.orderbooks is None else self.orderbooks
+        self.orders = {} if self.orders is None else self.orders
+        self.trades = {} if self.trades is None else self.trades
+        self.currencies = {} if self.currencies is None else self.currencies
+        self.options = {} if self.options is None else self.options  # Python does not allow to define properties in run-time with setattr
+
+        self.decimalToPrecision = self.decimal_to_precision = decimal_to_precision
 
         # version = '.'.join(map(str, sys.version_info[:3]))
         # self.userAgent = {
@@ -227,7 +242,6 @@ class Exchange(object):
             'delay': 1.0,
             'capacity': 1.0,
             'defaultCost': 1.0,
-            'maxCapacity': 1000,
         }, getattr(self, 'tokenBucket') if hasattr(self, 'tokenBucket') else {})
 
         self.session = self.session if self.session else Session()
@@ -400,7 +414,7 @@ class Exchange(object):
             else:
                 return response
         except ValueError as e:  # ValueError == JsonDecodeError
-            ddos_protection = re.search('(cloudflare|incapsula)', response, flags=re.IGNORECASE)
+            ddos_protection = re.search('(cloudflare|incapsula|overload|ddos)', response, flags=re.IGNORECASE)
             exchange_not_available = re.search('(offline|busy|retry|wait|unavailable|maintain|maintenance|maintenancing)', response, flags=re.IGNORECASE)
             if ddos_protection:
                 self.raise_error(DDoSProtection, method, url, None, response)
@@ -460,6 +474,9 @@ class Exchange(object):
 
     @staticmethod
     def capitalize(string):  # first character only, rest characters unchanged
+        # the native pythonic .capitalize() method lowercases all other characters
+        # which is an unwanted behaviour, therefore we use this custom implementation
+        # check it yourself: print('foobar'.capitalize(), 'fooBar'.capitalize())
         if len(string) > 1:
             return "%s%s" % (string[0].upper(), string[1:])
         return string.upper()
@@ -510,8 +527,7 @@ class Exchange(object):
     @staticmethod
     def group_by(array, key):
         result = {}
-        if type(array) is dict:
-            array = list(Exchange.keysort(array).items())
+        array = Exchange.to_array(array)
         array = [entry for entry in array if (key in entry) and (entry[key] is not None)]
         for entry in array:
             if entry[key] not in result:
@@ -536,11 +552,15 @@ class Exchange(object):
 
     @staticmethod
     def sort_by(array, key, descending=False):
-        return sorted(array, key=lambda k: k[key], reverse=descending)
+        return sorted(array, key=lambda k: k[key] if k[key] is not None else "", reverse=descending)
 
     @staticmethod
     def array_concat(a, b):
         return a + b
+
+    @staticmethod
+    def in_array(needle, haystack):
+        return needle in haystack
 
     @staticmethod
     def extract_params(string):
@@ -651,9 +671,9 @@ class Exchange(object):
         return utc.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-6] + "{:<03d}".format(int(timestamp) % 1000) + 'Z'
 
     @staticmethod
-    def ymd(timestamp):
+    def ymd(timestamp, infix='-'):
         utc_datetime = datetime.datetime.utcfromtimestamp(int(round(timestamp / 1000)))
-        return utc_datetime.strftime('%Y-%m-%d')
+        return utc_datetime.strftime('%Y' + infix + '%m' + infix + '%d')
 
     @staticmethod
     def ymdhms(timestamp, infix=' '):
@@ -662,6 +682,8 @@ class Exchange(object):
 
     @staticmethod
     def parse_date(timestamp):
+        if timestamp is None:
+            return timestamp
         if 'GMT' in timestamp:
             string = ''.join([str(value) for value in parsedate(timestamp)[:6]]) + '.000Z'
             dt = datetime.datetime.strptime(string, "%Y%m%d%H%M%S.%fZ")
@@ -673,12 +695,12 @@ class Exchange(object):
     def parse8601(timestamp):
         yyyy = '([0-9]{4})-?'
         mm = '([0-9]{2})-?'
-        dd = '([0-9]{2})(?:T|[\s])?'
+        dd = '([0-9]{2})(?:T|[\\s])?'
         h = '([0-9]{2}):?'
         m = '([0-9]{2}):?'
         s = '([0-9]{2})'
-        ms = '(\.[0-9]{1,3})?'
-        tz = '(?:(\+|\-)([0-9]{2})\:?([0-9]{2})|Z)?'
+        ms = '(\\.[0-9]{1,3})?'
+        tz = '(?:(\\+|\\-)([0-9]{2})\\:?([0-9]{2})|Z)?'
         regex = r'' + yyyy + mm + dd + h + m + s + ms + tz
         match = re.search(regex, timestamp, re.IGNORECASE)
         yyyy, mm, dd, h, m, s, ms, sign, hours, minutes = match.groups()
@@ -769,6 +791,14 @@ class Exchange(object):
             if self.requiredCredentials[key] and not getattr(self, key):
                 self.raise_error(AuthenticationError, details='requires `' + key + '`')
 
+    def check_address(self, address):
+        """Checks an address is not the same character repeated or an empty sequence"""
+        if address is None:
+            self.raise_error(InvalidAddress, details='address is None')
+        if all(letter == address[0] for letter in address) or len(address) < self.minFundingAddressLength or ' ' in address:
+            self.raise_error(InvalidAddress, details='address is invalid or has less than ' + str(self.minFundingAddressLength) + ' characters: "' + str(address) + '"')
+        return address
+
     def account(self):
         return {
             'free': 0.0,
@@ -779,13 +809,11 @@ class Exchange(object):
     def common_currency_code(self, currency):
         if not self.substituteCommonCurrencyCodes:
             return currency
-        if currency == 'XBT':
-            return 'BTC'
-        if currency == 'BCC':
-            return 'BCH'
-        if currency == 'DRK':
-            return 'DASH'
-        return currency
+        return self.safe_string(self.commonCurrencies, currency, currency)
+
+    def currency_id(self, commonCode):
+        currencyIds = {v: k for k, v in self.commonCurrencies.items()}
+        return self.safe_string(currencyIds, commonCode, commonCode)
 
     def precision_from_string(self, string):
         parts = re.sub(r'0+$', '', string).split('.')
@@ -828,11 +856,23 @@ class Exchange(object):
         else:
             base_currencies = [{
                 'id': market['baseId'] if 'baseId' in market else market['base'],
+                'numericId': market['baseNumericId'] if 'baseNumericId' in market else None,
                 'code': market['base'],
+                'precision': (
+                    market['precision']['base'] if 'base' in market['precision'] else (
+                        market['precision']['amount'] if 'amount' in market['precision'] else None
+                    )
+                ) if 'precision' in market else 8,
             } for market in values if 'base' in market]
             quote_currencies = [{
                 'id': market['quoteId'] if 'quoteId' in market else market['quote'],
+                'numericId': market['quoteNumericId'] if 'quoteNumericId' in market else None,
                 'code': market['quote'],
+                'precision': (
+                    market['precision']['quote'] if 'quote' in market['precision'] else (
+                        market['precision']['price'] if 'price' in market['precision'] else None
+                    )
+                ) if 'precision' in market else 8,
             } for market in values if 'quote' in market]
             currencies = self.sort_by(base_currencies + quote_currencies, 'code')
             self.currencies = self.deep_extend(self.index_by(currencies, 'code'), self.currencies)
@@ -865,7 +905,7 @@ class Exchange(object):
     def load_fees(self):
         self.load_markets()
         self.populate_fees()
-        if not self.has['fetchFees']:
+        if not (self.has['fetchTradingFees'] or self.has['fetchFundingFees']):
             return self.fees
 
         fetched_fees = self.fetch_fees()
@@ -878,7 +918,7 @@ class Exchange(object):
         return self.fees
 
     def fetch_markets(self):
-        return self.markets
+        return self.to_array(self.markets)
 
     def fetch_fees(self):
         trading = {}
@@ -897,8 +937,16 @@ class Exchange(object):
         except AttributeError:
             pass
 
-        return {'trading': trading,
-                'funding': funding}
+        return {
+            'trading': trading,
+            'funding': funding,
+        }
+
+    def create_order(self, symbol, type, side, amount, price=None, params={}):
+        self.raise_error(NotSupported, details='create_order() not implemented yet')
+
+    def cancel_order(self, id, symbol=None, params={}):
+        self.raise_error(NotSupported, details='cancel_order() not implemented yet')
 
     def fetch_bids_asks(self, symbols=None, params={}):
         self.raise_error(NotSupported, details='API does not allow to fetch all prices at once with a single call to fetch_bid_asks() for now')
@@ -909,6 +957,12 @@ class Exchange(object):
     def fetch_order_status(self, id, market=None):
         order = self.fetch_order(id)
         return order['status']
+
+    def purge_cached_orders(self, before):
+        orders = self.to_array(self.orders)
+        orders = [order for order in orders if (order['status'] == 'open') or (order['timestamp'] >= before)]
+        self.orders = self.index_by(orders, 'id')
+        return self.orders
 
     def fetch_order(self, id, symbol=None, params={}):
         self.raise_error(NotSupported, details='fetch_order() is not implemented yet')
@@ -929,7 +983,7 @@ class Exchange(object):
         self.raise_error(NotSupported, details='fetch_order_trades() is not implemented yet')
 
     def parse_ohlcv(self, ohlcv, market=None, timeframe='1m', since=None, limit=None):
-        return ohlcv
+        return ohlcv[0:6] if isinstance(ohlcv, list) else ohlcv
 
     def parse_ohlcvs(self, ohlcvs, market=None, timeframe='1m', since=None, limit=None):
         ohlcvs = self.to_array(ohlcvs)
@@ -972,12 +1026,12 @@ class Exchange(object):
         })
 
     def parse_order_book(self, orderbook, timestamp=None, bids_key='bids', asks_key='asks', price_key=0, amount_key=1):
-        timestamp = timestamp or self.milliseconds()
         return {
-            'bids': self.parse_bids_asks(orderbook[bids_key], price_key, amount_key) if (bids_key in orderbook) and isinstance(orderbook[bids_key], list) else [],
-            'asks': self.parse_bids_asks(orderbook[asks_key], price_key, amount_key) if (asks_key in orderbook) and isinstance(orderbook[asks_key], list) else [],
+            'bids': self.sort_by(self.parse_bids_asks(orderbook[bids_key], price_key, amount_key) if (bids_key in orderbook) and isinstance(orderbook[bids_key], list) else [], 0, True),
+            'asks': self.sort_by(self.parse_bids_asks(orderbook[asks_key], price_key, amount_key) if (asks_key in orderbook) and isinstance(orderbook[asks_key], list) else [], 0),
             'timestamp': timestamp,
-            'datetime': self.iso8601(timestamp),
+            'datetime': self.iso8601(timestamp) if timestamp is not None else None,
+            'nonce': None,
         }
 
     def parse_balance(self, balance):
@@ -1002,32 +1056,143 @@ class Exchange(object):
         return self.fetch_partial_balance('total', params)
 
     def fetch_ohlcv(self, symbol, timeframe='1m', since=None, limit=None, params={}):
-        self.raise_error(NotSupported, details='API does not allow to fetch OHLCV series for now')
+        if not self.has['fetchTrades']:
+            self.raise_error(NotSupported, details='fetch_ohlcv() not implemented yet')
+        self.load_markets()
+        trades = self.fetch_trades(symbol, since, limit, params)
+        return self.build_ohlcv(trades, timeframe, since, limit)
+
+    def convert_trading_view_to_ohlcv(self, ohlcvs):
+        result = []
+        for i in range(0, len(ohlcvs['t'])):
+            result.append([
+                ohlcvs['t'][i] * 1000,
+                ohlcvs['o'][i],
+                ohlcvs['h'][i],
+                ohlcvs['l'][i],
+                ohlcvs['c'][i],
+                ohlcvs['v'][i],
+            ])
+        return result
+
+    def convert_ohlcv_to_trading_view(self, ohlcvs):
+        result = {
+            't': [],
+            'o': [],
+            'h': [],
+            'l': [],
+            'c': [],
+            'v': [],
+        }
+        for i in range(0, len(ohlcvs)):
+            result['t'].append(int(ohlcvs[i][0] / 1000))
+            result['o'].append(ohlcvs[i][1])
+            result['h'].append(ohlcvs[i][2])
+            result['l'].append(ohlcvs[i][3])
+            result['c'].append(ohlcvs[i][4])
+            result['v'].append(ohlcvs[i][5])
+        return result
+
+    def build_ohlcv(self, trades, timeframe='1m', since=None, limit=None):
+        ms = self.parse_timeframe(timeframe) * 1000
+        ohlcvs = []
+        (high, low, close, volume) = (2, 3, 4, 5)
+        num_trades = len(trades)
+        oldest = (num_trades - 1) if limit is None else min(num_trades - 1, limit)
+        for i in range(0, oldest):
+            trade = trades[i]
+            if (since is not None) and (trade['timestamp'] < since):
+                continue
+            opening_time = int(math.floor(trade['timestamp'] / ms) * ms)  # Shift the edge of the m/h/d (but not M)
+            j = len(ohlcvs)
+            if (j == 0) or opening_time >= ohlcvs[j - 1][0] + ms:
+                # moved to a new timeframe -> create a new candle from opening trade
+                ohlcvs.append([
+                    opening_time,
+                    trade['price'],
+                    trade['price'],
+                    trade['price'],
+                    trade['price'],
+                    trade['amount'],
+                ])
+            else:
+                # still processing the same timeframe -> update opening trade
+                ohlcvs[j - 1][high] = max(ohlcvs[j - 1][high], trade['price'])
+                ohlcvs[j - 1][low] = min(ohlcvs[j - 1][low], trade['price'])
+                ohlcvs[j - 1][close] = trade['price']
+                ohlcvs[j - 1][volume] += trade['amount']
+        return ohlcvs
+
+    def parse_timeframe(self, timeframe):
+        amount = int(timeframe[0:-1])
+        unit = timeframe[-1]
+        if 'y' in unit:
+            scale = 60 * 60 * 24 * 365
+        elif 'M' in unit:
+            scale = 60 * 60 * 24 * 30
+        elif 'w' in unit:
+            scale = 60 * 60 * 24 * 7
+        elif 'd' in unit:
+            scale = 60 * 60 * 24
+        elif 'h' in unit:
+            scale = 60 * 60
+        else:
+            scale = 60  # 1m by default
+        return amount * scale
 
     def parse_trades(self, trades, market=None, since=None, limit=None):
         array = self.to_array(trades)
         array = [self.parse_trade(trade, market) for trade in array]
-        return self.filter_by_since_limit(array, since, limit)
+        array = self.sort_by(array, 'timestamp')
+        symbol = market['symbol'] if market else None
+        return self.filter_by_symbol_since_limit(array, symbol, since, limit)
 
     def parse_orders(self, orders, market=None, since=None, limit=None):
         array = self.to_array(orders)
         array = [self.parse_order(order, market) for order in array]
-        return self.filter_by_since_limit(array, since, limit)
+        array = self.sort_by(array, 'timestamp')
+        symbol = market['symbol'] if market else None
+        return self.filter_by_symbol_since_limit(array, symbol, since, limit)
 
-    def filter_by_since_limit(self, array, since=None, limit=None):
+    def filter_by_symbol_since_limit(self, array, symbol=None, since=None, limit=None):
+        array = self.to_array(array)
+        if symbol:
+            array = [entry for entry in array if entry['symbol'] == symbol]
         if since:
-            array = [entry for entry in array if entry['timestamp'] > since]
+            array = [entry for entry in array if entry['timestamp'] >= since]
         if limit:
             array = array[0:limit]
         return array
 
-    def filter_orders_by_symbol(self, orders, symbol=None):
+    def filter_by_since_limit(self, array, since=None, limit=None):
+        array = self.to_array(array)
+        if since:
+            array = [entry for entry in array if entry['timestamp'] >= since]
+        if limit:
+            array = array[0:limit]
+        return array
+
+    def filter_by_symbol(self, array, symbol=None):
+        array = self.to_array(array)
         if symbol:
-            grouped = self.group_by(orders, 'symbol')
-            if symbol in grouped:
-                return grouped[symbol]
-            return []
-        return orders
+            return [entry for entry in array if entry['symbol'] == symbol]
+        return array
+
+    def filter_by_array(self, objects, key, values=None, indexed=True):
+
+        objects = self.to_array(objects)
+
+        # return all of them if no values were passed in
+        if values is None:
+            return self.index_by(objects, key) if indexed else objects
+
+        result = []
+        for i in range(0, len(objects)):
+            value = objects[i][key] if key in objects[i] else None
+            if value in values:
+                result.append(objects[i])
+
+        return self.index_by(result, key) if indexed else result
 
     def currency(self, code):
         if not self.currencies:
@@ -1035,6 +1200,23 @@ class Exchange(object):
         if isinstance(code, basestring) and (code in self.currencies):
             return self.currencies[code]
         self.raise_error(ExchangeError, details='Does not have currency code ' + str(code))
+
+    def find_market(self, string):
+        if not self.markets:
+            self.raise_error(ExchangeError, details='Markets not loaded')
+        if isinstance(string, basestring):
+            if string in self.markets_by_id:
+                return self.markets_by_id[string]
+            if string in self.markets:
+                return self.markets[string]
+        return string
+
+    def find_symbol(self, string, market=None):
+        if market is None:
+            market = self.find_market(string)
+        if isinstance(market, dict):
+            return market['symbol']
+        return string
 
     def market(self, symbol):
         if not self.markets:
@@ -1044,7 +1226,7 @@ class Exchange(object):
         self.raise_error(ExchangeError, details='No market symbol ' + str(symbol))
 
     def market_ids(self, symbols):
-        return [self.marketId(symbol) for symbol in symbols]
+        return [self.market_id(symbol) for symbol in symbols]
 
     def market_id(self, symbol):
         market = self.market(symbol)
@@ -1062,10 +1244,10 @@ class Exchange(object):
         }
 
     def edit_limit_buy_order(self, id, symbol, *args):
-        return self.edit_limit_order(symbol, 'buy', *args)
+        return self.edit_limit_order(id, symbol, 'buy', *args)
 
     def edit_limit_sell_order(self, id, symbol, *args):
-        return self.edit_limit_order(symbol, 'sell', *args)
+        return self.edit_limit_order(id, symbol, 'sell', *args)
 
     def edit_limit_order(self, id, symbol, *args):
         return self.edit_order(id, symbol, 'limit', *args)
@@ -1095,4 +1277,4 @@ class Exchange(object):
         return self.create_order(symbol, 'market', 'sell', amount, None, params)
 
     def sign(self, path, api='public', method='GET', params={}, headers=None, body=None):
-        raise NotImplemented(self.id + ' sign() pure method must be redefined in derived classes')
+        raise NotSupported(self.id + ' sign() pure method must be redefined in derived classes')
